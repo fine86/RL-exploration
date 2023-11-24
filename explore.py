@@ -4,42 +4,78 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+import wandb
 
+wandb.init(project = 'PPO Exploration Train')
+wandb.run.name = "Exploration"
+wandb.save()
+
+learning_rate=0.00025
+gamma=0.99
+lmbda=0.96
+K_epoch=5
+eps_clip=0.1
+
+args = {
+    "learning_rate" : learning_rate,
+    "epochs" : K_epoch,
+    "gamma" : gamma,
+    "clip" : eps_clip,
+    "lambda" : lmbda
+}
+wandb.config.update(args)
+
+np.set_printoptions(threshold=np.inf, linewidth=np.inf) 
 class exploreEnv(object):
-    def __init__(self, env, observe):
+    def __init__(self, env, observe, max_failed = 5):
         self.env = env
         self.size = len(env)
         self.observe = observe
+        self.not_observed = 0
+        self.max_failed = max_failed
         self.done = False
-        self.state = [5, 5]
-        self.action = [[1, 0],
-                       [1, 1],
-                       [0, 1],
-                       [-1, 1],
-                       [-1, 0],
-                       [-1, -1],
-                       [0, -1],
-                       [1, -1]]
+        self.state = [10, 10]
+        self.action = [[5, 0],
+                       [5, 5],
+                       [0, 5],
+                       [-5, 5],
+                       [-5, 0],
+                       [-5, -5],
+                       [0, -5],
+                       [5, -5]]
         self.obstacle = []
         self.observable_area = pow(self.size, 2)
         self.recent_action = [-1, -1]
+        self.negative_reward = 0
+        self.positive_reward = 0
 
     def reset_env(self, num):
         self.env = np.zeros((self.size, self.size))
-        self.state = [5, 5]
+        self.state = [7, 7]
         self.set_agent()
+        self.observable_area = pow(self.size, 2)
+        self.recent_observe = [-1, -1, -1, -1, -1]
+        self.observation()
         self.done = False
+        self.stop = False
+        self.negative_reward = 0
+        self.positive_reward = 0
 
         for i in range(num):
             obstacle = [random.randrange(20, 80), random.randrange(20, 80)]
             obstacle_size = random.randrange(5, 10)
-            exploration.set_obstacle(obstacle, obstacle_size)
+            self.set_obstacle(obstacle, obstacle_size)
 
-        return env
+        return self.env
 
     def set_agent(self):
+        if self.state[0] < 0 or self.state[0] >= self.size or self.state[1] < 0 or self.state[1] >= self.size:
+           # print("Error. Agent out of environment!")
+            self.done = True
+            return
+
         if self.env[self.state[1], self.state[0]] == 0.7:
-            print("Collision Occurs.")
+           # print("Collision Occurs.")
             self.done = True
 
             return
@@ -57,51 +93,74 @@ class exploreEnv(object):
         
         for i in range(obstacle[0] - l, obstacle[0] + l + 1):
             for j in range(obstacle[1] - l, obstacle[1] + l + 1):
-                if pow(i, 2) + pow(j, 2) <= pow(l, 2):
+                if pow(i - obstacle[0], 2) + pow(j - obstacle[1], 2) <= pow(l, 2):
                     self.env[j, i] = 0.7
                     self.observable_area -= 1
 
     def explore(self, a):
         self.env[self.state[1], self.state[0]] = 0.4
         next_action = self.action[a]
+
         self.state[0] += next_action[0]
         self.state[1] += next_action[1]
+
+        
         self.set_agent()
         self.recent_action[0] = self.recent_action[1]
         self.recent_action[1] = a
         reward = self.observation()
 
         return self.env, reward, self.done
-
+    
     # 이동한 위치에서의 reward 계산
     def observation(self):
-        positive_reward=0
-        negative_reward=0
-        
+        observed_areas = 0
+        observed_obstacles = 0
         if self.done:
-            negative_reward -= 20000
-            return negative_reward
+            self.negative_reward = -1000
+            return self.negative_reward
         
-        for i in range(max([0, self.state[0] - self.observe]), min([self.size, self.state[0] + self.observe] + 1)):
-            for j in range(max([0, self.state[1] - self.observe]), min([self.size, self.state[1] + self.observe] + 1)):
-                if pow(i, 2) + pow(j, 2) <= pow(self.observe, 2):
+        if self.recent_action[0]==self.action[0] or self.recent_action[1]==self.action[1]:
+            self.positive_reward += 200
+        
+        for i in range(max(0, self.state[0] - self.observe), min(self.size, self.state[0] + self.observe + 1)):
+            for j in range(max(0, self.state[1] - self.observe), min(self.size, self.state[1] + self.observe + 1)):
+                if pow(i - self.state[0], 2) + pow(j - self.state[1], 2) <= pow(self.observe, 2):
                     if self.env[j, i] == 0:
-                        positive_reward += 1
+                        observed_areas += 1
                         self.env[j, i] = 0.4
                         self.observable_area -= 1
                     
                     elif self.env[j, i] == 0.7:
-                        negative_reward -= 2
+                        observed_obstacles += 1
         
+        self.positive_reward += int(pow(observed_areas * 0.05, 2))
+        self.negative_reward -= int(pow(observed_obstacles * 0.05, 2))
+
+        if observed_areas == 0:
+            self.not_observed += 1
+        
+        elif self.not_observed != 0:
+            self.not_observed = 0
+
+        #print(self.positive_reward)
         if self.observable_area==0:
-            positive_reward += 1000
+            self.positive_reward += 3000
+            self.done = True
+        
+        elif self.observable_area <= pow(self.size, 2) * 0.1 and self.not_observed == self.max_failed:
+            self.positive_reward += 1500
             self.done = True
 
-        elif positive_reward==0:
-            negative_reward -= self.observable_area * 5
+        elif self.observable_area <= pow(self.size, 2) * 0.2 and self.not_observed == self.max_failed:
+            self.positive_reward += 500
+            self.done = True
+        
+        elif self.not_observed == self.max_failed:
+            self.negative_reward = -1000
             self.done = True
 
-        return positive_reward + negative_reward
+        return self.positive_reward + self.negative_reward
     
     # 여기 학습할 RL 모델 구현
 
@@ -146,20 +205,21 @@ class PPO:
             self,
             state_dim,
             action_dim,
-            lr=0.00025,
-            gamma=0.99,
-            lmbda=0.96,
-            K_epoch=5,
-            eps_clip=0.1
+            lr=learning_rate,
+            g=gamma,
+            l=lmbda,
+            e=K_epoch,
+            clip=eps_clip
     ):
         self.data = []
         self.action_dim = action_dim
-        self.gamma = gamma
-        self.lmbda = lmbda
-        self.K_epoch = K_epoch
-        self.eps_clip = eps_clip
+        self.gamma = g
+        self.lmbda = l
+        self.K_epoch = e
+        self.eps_clip = clip
 
         self.actor = Actor(state_dim[0], action_dim)
+
         self.critic = Critic(state_dim[0])
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr)
@@ -170,13 +230,13 @@ class PPO:
         self.critic.to(self.device)
 
         self.buffer_size=0
+
     def put_data(self, transition):
         self.data.append(transition)
         return self.buffer_size
 
     def make_batch(self):
         s_lst, a_lst, r_lst, ns_lst, prob_a_lst, done_lst = [], [], [], [], [], []
-
         for transition in self.data:
             s, a, r, ns, prob_a, done = transition
 
@@ -205,9 +265,9 @@ class PPO:
         return prob
 
     def update_model(self):
-
         s, a, r, ns, done, prob_a = map(lambda x: x.to(self.device), self.make_batch())
-
+        #print('2')
+        #print(s.size())
         a = a.view(-1, 1)
         r = r.view(-1, 1)
         done = done.view(-1, 1)
@@ -245,26 +305,47 @@ class PPO:
             actor_loss.mean().backward()
             self.actor_optimizer.step()
 
+rewards = "reward.txt"
+output_file = open(rewards, 'w')
+
 env_size = 100
 env = np.zeros((env_size, env_size))
+#print(env)
+exploration = exploreEnv(env, 15)
 
-exploration = exploreEnv(env, 8)
-
-max_epoch = 20
+horizon = 128
 max_step = int(1e6)
 total_steps = 0
 eval_interval = 5000
 state_dim = (1, 100, 100)
-obstacle_num = 2
+obstacle_num = 0
 action_dim = exploration.action.__len__()
 
 agent = PPO(state_dim, action_dim)
 
+while total_steps < max_step:
+    #print(total_steps)
+    state = exploration.reset_env(obstacle_num)
+    state = np.tile(state, (1, 1, 1))
+    for i in range(horizon):
+        action_probs = agent.select_action(state)
+        m = Categorical(action_probs)
+        a = m.sample().item()
+        next_state, reward, done = exploration.explore(a)
+        next_state = np.tile(next_state, (1, 1, 1))
+        agent.put_data((state, a, reward, next_state, action_probs[0][a].item(), done))
 
-
-while total_steps > max_step:
-    exploration.reset_env(obstacle_num)
-
-    action_probs = agent.select_action()
-
+        state = next_state
     
+        if done:
+            break
+        
+    
+    print(f'{total_steps} reward : {reward}')
+    
+    wandb.log({"Traning Rewards" : reward})
+
+    output_file.write("%d\n"%reward)
+
+    agent.update_model()
+    total_steps += 1
