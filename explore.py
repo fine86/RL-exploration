@@ -4,10 +4,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.animation as animation
 import wandb
+from IPython.display import clear_output
+from IPython.display import HTML
+
 
 wandb.init(project = 'PPO Exploration Train')
-wandb.run.name = "Exploration"
+wandb.run.name = "Exploration test 3"
 wandb.save()
 
 learning_rate=0.00025
@@ -36,13 +42,13 @@ class exploreEnv(object):
         self.done = False
         self.state = [10, 10]
         self.action = [[5, 0],
-                       [5, 5],
+                       #[5, 5],
                        [0, 5],
-                       [-5, 5],
+                       #[-5, 5],
                        [-5, 0],
-                       [-5, -5],
-                       [0, -5],
-                       [5, -5]]
+                       #[-5, -5],
+                       [0, -5]]
+                       #[5, -5]]
         self.obstacle = []
         self.observable_area = pow(self.size, 2)
         self.recent_action = [-1, -1]
@@ -70,7 +76,7 @@ class exploreEnv(object):
 
     def set_agent(self):
         if self.state[0] < 0 or self.state[0] >= self.size or self.state[1] < 0 or self.state[1] >= self.size:
-           # print("Error. Agent out of environment!")
+            # print("Error. Agent out of environment!")
             self.done = True
             return
 
@@ -116,9 +122,6 @@ class exploreEnv(object):
     def observation(self):
         observed_areas = 0
         observed_obstacles = 0
-        if self.done:
-            self.negative_reward = -1000
-            return self.negative_reward
         
         if self.recent_action[0]==self.action[0] or self.recent_action[1]==self.action[1]:
             self.positive_reward += 200
@@ -159,6 +162,9 @@ class exploreEnv(object):
         elif self.not_observed == self.max_failed:
             self.negative_reward = -1000
             self.done = True
+        
+        elif self.done:
+            self.negative_reward = -1000
 
         return self.positive_reward + self.negative_reward
     
@@ -312,19 +318,57 @@ env_size = 100
 env = np.zeros((env_size, env_size))
 #print(env)
 exploration = exploreEnv(env, 15)
-
+history = {'Step': [], 'AvgReturn': []}
 horizon = 128
-max_step = int(1e6)
+max_step = int(5e5)
+max_score = -1e6
 total_steps = 0
 eval_interval = 5000
 state_dim = (1, 100, 100)
-obstacle_num = 0
+obstacle_num = 1
 action_dim = exploration.action.__len__()
 
 agent = PPO(state_dim, action_dim)
 
+def evaluate(n_evals=3, env_size=100, obstacle_num=1):
+    eval_env = np.zeros((env_size, env_size))
+    eval_env = exploreEnv(eval_env, 15)
+
+    scores = 0
+    for i in range(n_evals):
+        s = eval_env.reset_env(obstacle_num)
+        done = eval_env.done
+        while not done:
+            action_probs = agent.select_action(s)
+            m = Categorical(action_probs)
+            a = m.sample().item()
+            s_prime, r, done = eval_env.explore(a)
+            s = s_prime
+        scores += r
+    return np.round(scores / n_evals, 4)
+
+def visualize(env_size=100, obstacle_num=1):
+    eval_env = np.zeros((env_size, env_size))
+    eval_env = exploreEnv(eval_env, 15)
+
+    scores = 0
+    s = eval_env.reset_env(obstacle_num)
+    done = eval_env.done
+    frames = []
+
+    while not done:
+        frames.append(s)
+        action_probs = agent.select_action(s)
+        m = Categorical(action_probs)
+        a = m.sample().item()
+        s_prime, r, done = eval_env.explore(a)
+        s = s_prime
+    scores += r
+    return scores, frames
+
 while total_steps < max_step:
     #print(total_steps)
+
     state = exploration.reset_env(obstacle_num)
     state = np.tile(state, (1, 1, 1))
     for i in range(horizon):
@@ -338,14 +382,56 @@ while total_steps < max_step:
         state = next_state
     
         if done:
+            if total_steps % eval_interval == 0:
+                rewards = evaluate()
+                print("Steps: {}  AvgReturn: {}".format(total_steps, rewards))
+                history['Step'].append(total_steps)
+                history['AvgReturn'].append(rewards)
+
+                clear_output()
+                plt.figure(figsize=(8, 5))
+                plt.plot(history['Step'], history['AvgReturn'], 'r-')
+                plt.xlabel('Step', fontsize=16)
+                plt.ylabel('AvgReturn', fontsize=16)
+                plt.xticks(fontsize=14)
+                plt.yticks(fontsize=14)
+                plt.grid(axis='y')
+                plt.show(block=False)
+                plt.pause(1)
+                plt.close()
+
+                if rewards > max_score:
+                    max_score = rewards
+                    torch.save(agent.actor.state_dict(), 'actor.pt')
+                wandb.log({"Evaluation Rewards" : rewards})
             break
-        
     
-    print(f'{total_steps} reward : {reward}')
-    
-    wandb.log({"Traning Rewards" : reward})
+    print(f'Train steps : {total_steps} reward : {reward}')
+
+    wandb.log({"Training Rewards" : reward})
 
     output_file.write("%d\n"%reward)
 
     agent.update_model()
     total_steps += 1
+
+test_env = exploreEnv(env)
+state_dim = (1, 100, 100)
+action_dim = test_env.action.__len__()
+agent = PPO(state_dim, action_dim)
+agent.actor.load_state_dict(torch.load("actor.pt"))
+rewards = evaluate(n_evals=3)
+print("Test Score:", rewards)
+
+rewards, frames = visualize()
+print("Visualize score:", rewards)
+
+fig = plt.figure(figsize = (5, 5))
+plt.axis('off')
+image = plt.imshow(frames[0], cmap=cm.gray)
+def animate(i):
+    image.set_array(frames[i])
+    return image,
+
+anime = animation.FuncAnimation(fig, animate, frames, frames=len(frames))
+HTML(anime.to_jshtml())
