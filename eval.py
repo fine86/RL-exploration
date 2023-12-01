@@ -14,33 +14,17 @@ import wandb
 from IPython.display import clear_output
 from IPython.display import HTML
 
-train_name = "[ver.2] 4 action 1 obstacle"
-
-wandb.init(project = 'PPO Exploration Train')
-wandb.run.name = train_name
-wandb.save()
-
 learning_rate=0.00025
 gamma=0.99
 lmbda=0.96
 K_epoch=5
 eps_clip=0.1
 
-args = {
-    "learning_rate" : learning_rate,
-    "epochs" : K_epoch,
-    "gamma" : gamma,
-    "clip" : eps_clip,
-    "lambda" : lmbda
-}
-wandb.config.update(args)
-
 np.set_printoptions(threshold=np.inf, linewidth=np.inf) 
 
 class exploreEnv(object):
     def __init__(self, env, observe, max_failed = 5):
         self.env = env
-        self.past_env = env
         self.steps = 0
         self.size = len(env)
         self.observe = observe
@@ -48,39 +32,34 @@ class exploreEnv(object):
         self.max_failed = max_failed
         self.done = False
         self.state = [10, 10]
-        self.action = [[5, 0],
-                       #[5, 5],
-                       [0, 5],
-                       #[-5, 5],
-                       [-5, 0],
-                       #[-5, -5],
-                       [0, -5]]
-                       #[5, -5]]
+        self.action = [[7, 0],
+                       [7, 7],
+                       [0, 7],
+                       [-7, 7],
+                       [-7, 0],
+                       [-7, -7],
+                       [0, -7],
+                       [7, -7]]
         self.obstacle = []
         self.observable_area = pow(self.size, 2)
         self.whole_area = self.observable_area
         self.recent_action = [-1, -1]
-        self.positive_reward = 0
         self.negative_reward = 0
+        self.positive_reward = 0
 
     def reset_env(self, num):
         self.env = np.zeros((self.size, self.size))
-
-        for i in range(self.size):
-            for j in range(self.size):
-                if self.past_env[j, i] ==0 or self.past_env[j, i] ==0.2:
-                    self.env[j, i]  = 0.2
-    
         self.steps = 0
         self.state = [7, 7]
         self.set_agent()
         self.observable_area = pow(self.size, 2)
         self.whole_area = self.observable_area
+        self.recent_observe = [-1, -1, -1, -1, -1]
         self.observation()
         self.done = False
         self.stop = False
-        self.positive_reward = 0
         self.negative_reward = 0
+        self.positive_reward = 0
 
         for i in range(num):
             obstacle = [random.randrange(20, 80), random.randrange(20, 80)]
@@ -98,6 +77,7 @@ class exploreEnv(object):
         if self.env[self.state[1], self.state[0]] == 0.7:
            # print("Collision Occurs.")
             self.done = True
+
             return
 
         elif self.env[self.state[1], self.state[0]] == 0:
@@ -120,7 +100,7 @@ class exploreEnv(object):
         self.whole_area = self.observable_area
 
     def explore(self, a):
-        self.env[self.state[1], self.state[0]] = 0.5
+        self.env[self.state[1], self.state[0]] = 0.4
         next_action = self.action[a]
 
         self.state[0] += next_action[0]
@@ -140,25 +120,19 @@ class exploreEnv(object):
         observed_obstacles = 0
         
         if self.recent_action[0]==self.action[0] or self.recent_action[1]==self.action[1]:
-            self.positive_reward += 100
+            self.positive_reward += 200
         
         for i in range(max(0, self.state[0] - self.observe), min(self.size, self.state[0] + self.observe + 1)):
             for j in range(max(0, self.state[1] - self.observe), min(self.size, self.state[1] + self.observe + 1)):
                 if pow(i - self.state[0], 2) + pow(j - self.state[1], 2) <= pow(self.observe, 2):
                     if self.env[j, i] == 0:
                         observed_areas += 1
-                        self.env[j, i] = 0.5
+                        self.env[j, i] = 0.4
                         self.observable_area -= 1
                     
-                    elif self.env[j, i] == 0.2:
-                        observed_areas += 2
-                        self.env[j, i] = 0.5
-                        #self.positive_reward += 0.5
-                        self.observable_area -= 1
-
                     elif self.env[j, i] == 0.7:
                         observed_obstacles += 1
-
+        
         self.positive_reward += int(pow(observed_areas * 0.05, 2))
         self.negative_reward -= int(pow(observed_obstacles * 0.05, 2))
 
@@ -169,27 +143,23 @@ class exploreEnv(object):
             self.not_observed = 0
 
         if self.observable_area==0:
-            self.positive_reward = 10000
-            self.negative_reward = 0
+            self.positive_reward += 3000
             self.done = True
         
         elif self.observable_area <= pow(self.size, 2) * 0.1 and self.not_observed == self.max_failed:
-            self.positive_reward += 2000
+            self.positive_reward += 1500
             self.done = True
 
         elif self.observable_area <= pow(self.size, 2) * 0.2 and self.not_observed == self.max_failed:
-            self.positive_reward += 1000
+            self.positive_reward += 500
             self.done = True
         
         elif self.not_observed == self.max_failed:
-            self.negative_reward -= self.observable_area * 0.2
+            self.negative_reward = -1000
             self.done = True
         
         elif self.done:
             self.negative_reward = -1000
-
-        if self.done:
-            self.past_env = self.env.copy()
 
         return self.positive_reward + self.negative_reward
 
@@ -334,11 +304,6 @@ class PPO:
             actor_loss.mean().backward()
             self.actor_optimizer.step()
 
-video_file = f'{train_name}.avi'
-fps = 15
-fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-video_writer = cv2.VideoWriter(video_file, fourcc, fps, (100, 100), isColor = False)
-
 env_size = 100
 env = np.zeros((env_size, env_size))
 #print(env)
@@ -352,107 +317,46 @@ eval_interval = 5000
 state_dim = (1, 100, 100)
 obstacle_num = 1
 action_dim = exploration.action.__len__()
-
 agent = PPO(state_dim, action_dim)
+agent.actor.load_state_dict(torch.load("actor2.pt"))
 
-def evaluate(n_evals=3, env_size=100, obstacle_num=1, eval_agent = agent):
+video_file = 'exploration2.avi'
+fps = 15
+fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+video_writer = cv2.VideoWriter(video_file, fourcc, fps, (100, 100), isColor = False)
+
+def evaluate(n_evals=3, env_size=100, obstacle_num=1):
+
+
     eval_env = np.zeros((env_size, env_size))
     eval_env = exploreEnv(eval_env, 15)
 
     scores = 0
+    
     for i in range(n_evals):
         s = eval_env.reset_env(obstacle_num)
         done = eval_env.done
         while not done:
-            action_probs = eval_agent.select_action(s)
+            if i == 0:
+                frame = (s * 255).astype(np.uint8)
+                video_writer.write(frame)
+
+            action_probs = agent.select_action(s)
             m = Categorical(action_probs)
             a = m.sample().item()
             s_prime, r, done = eval_env.explore(a)
             s = s_prime
         scores += r
-    return np.round(scores / n_evals, 4)
 
-def visualize(env_size=100, obstacle_num=1, eval_agent = agent):
-    eval_env = np.zeros((env_size, env_size))
-    eval_env = exploreEnv(eval_env, 15)
-
-    scores = 0
-    s = eval_env.reset_env(obstacle_num)
-    done = eval_env.done
-
-    while not done:
-        frame = (s * 255).astype(np.uint8)
-        video_writer.write(frame)
-
-        action_probs = eval_agent.select_action(s)
-        m = Categorical(action_probs)
-        a = m.sample().item()
-        s_prime, r, done = eval_env.explore(a)
-        s = s_prime
-    scores += r
     video_writer.release()
 
     if os.path.exists(video_file):
         print(f"비디오가 성공적으로 저장되었습니다: {video_file}")
     else:
         print("비디오 저장 실패")
-    return scores
+
+    return np.round(scores / n_evals, 4)
 
 
-while total_steps < max_step:
-    #print(total_steps)
-
-    state = exploration.reset_env(obstacle_num)
-    state = np.tile(state, (1, 1, 1))
-    for i in range(horizon):
-        action_probs = agent.select_action(state)
-        m = Categorical(action_probs)
-        a = m.sample().item()
-        next_state, reward, done = exploration.explore(a)
-        next_state = np.tile(next_state, (1, 1, 1))
-        agent.put_data((state, a, reward, next_state, action_probs[0][a].item(), done))
-
-        state = next_state
-    
-        if done:
-            if total_steps % eval_interval == 0:
-                rewards = evaluate()
-                print("Steps: {}  AvgReturn: {}".format(total_steps, rewards))
-                history['Step'].append(total_steps)
-                history['AvgReturn'].append(rewards)
-
-                clear_output()
-                plt.figure(figsize=(8, 5))
-                plt.plot(history['Step'], history['AvgReturn'], 'r-')
-                plt.xlabel('Step', fontsize=16)
-                plt.ylabel('AvgReturn', fontsize=16)
-                plt.xticks(fontsize=14)
-                plt.yticks(fontsize=14)
-                plt.grid(axis='y')
-                plt.show(block=False)
-                plt.pause(1)
-                plt.close()
-
-                if rewards > max_score:
-                    max_score = rewards
-                    torch.save(agent.actor.state_dict(), f'{train_name}.pt')
-                wandb.log({"Evaluation Rewards" : rewards})
-            break
-    
-    #print(f'Train steps : {total_steps} reward : {reward}')
-
-    wandb.log({"Training Rewards" : reward})
-
-    agent.update_model()
-    total_steps += 1
-
-
-
-test_agent = PPO(state_dim, action_dim)
-test_agent.actor.load_state_dict(torch.load(f'{train_name}.pt'))    
-
-rewards = evaluate(n_evals=3, eval_agent=test_agent)
+rewards = evaluate(n_evals=1)
 print("Test Score:", rewards)
-
-rewards = visualize()
-print("Visualize score:", rewards, eval_agent=test_agent)
