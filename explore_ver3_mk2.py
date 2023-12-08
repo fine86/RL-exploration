@@ -14,7 +14,7 @@ import wandb
 from IPython.display import clear_output
 from IPython.display import HTML
 
-train_name = "[ver.3]"
+train_name = "[ver.3] mk2"
 
 wandb.init(project = 'PPO Exploration Train')
 wandb.run.name = train_name
@@ -157,7 +157,6 @@ class exploreEnv(object):
 
         return distance
 
-    
     # 이동한 위치에서의 reward 계산
     def observation(self):
         success = True
@@ -179,38 +178,58 @@ class exploreEnv(object):
 
         if current_distance < self.observed_boundary:
             self.negative_reward -= 100
+        #2트
+        ### 여기도 조건 추가해줘야 할 것 같음. step 간격을 기준으로 하면 안될 것 같은데
+        #### 수정 완. step 간격을 기준으로 했음
+        #### 대신 step 때문에 멈추면 negative reward 추가. max 600
+        current_explore_step = self.steps - self.observed_step
+        current_explore_boundary = current_distance - self.observed_boundary
 
-        if current_distance - self.observed_boundary > 20:
+        if current_explore_boundary > 20 or current_explore_step > 30:
+            self.negative_reward -= current_explore_step * 20
             success = self.check_observed(current_distance)
 
+        #2트
+        ### 수정 완. 2000->3000
         if self.stop:
-            self.negative_reward -= 2000
+            self.negative_reward -= 3000
             self.done = True
         
+        # 2트
+        ### 수정 완. 1000->1500
         elif not success:
-            self.negative_reward -= 1000
+            self.negative_reward -= 1500
             self.done = True
-        
+        #2트
+        ### 얘가 큰 듯. success만 계속하고 있으면 reward가 계속 커지니깐 50% 언저리에서 오락가락 하고 있는거 같음
+        ### 근데 check 조건이 observed_boundary가 20 이상 커질 땐데 그게 되나?
+        #### 수정 완. 100->30, max 128 * 20 = 2560
         elif success:
-            self.positive_reward += 100
+            self.positive_reward += 60
 
         elif self.observable_area == 0:
             self.positive_reward += 6000
             print("Success")
             self.done = True
-
+        #2트
+        ### 얘도 크게
+        #### 수정 완. 50 -> 200
         elif observed_areas == 0:
-            self.negative_reward -= 50
-
+            self.negative_reward -= 200
+        #2트
+        ### 얘는 크게
+        #### 수정 완. 탐색한 거리의 제곱근에 비례하게
+        ######## 만약에 다음에도 학습 안되면 1순위로 얘부터 고쳐야 함
         else:
-            if current_distance==0:
-                self.positive_reward += observed_areas * 0.1
-            else:
-                self.positive_reward += observed_areas * 0.1 * self.size * math.sqrt(2) / current_distance
-
+            self.positive_reward += observed_areas * 0.3 * (math.sqrt(current_distance / (self.size * math.sqrt(2))) + 0.3)
+        #2트
+        ### 얘도 키워줘야 할 것 같음. total이 8000 언저린데 50% 학습한다고 더 멀리까지 찾지는 않을 듯?
+        ### 얘도 더 많이 탐색할수록 비율 커지게 설정해야 할 듯(제곱?)
+        ###### 수정 완료(제곱), positive 최대 5000
+        ######### 안 될 시 경향성 보고 minimum 값 clip 하는 것도 고려
         if self.done or self.steps == self.max_steps:
-            self.final_observation = 100 * (self.whole_area - self.observable_area) / self.whole_area
-            self.positive_reward += self.final_observation * 20
+            self.final_observation = 100 * pow((self.whole_area - self.observable_area) / self.whole_area + 0.3, 2)
+            self.positive_reward += self.final_observation * 50
 
         return self.positive_reward + self.negative_reward
 
@@ -360,6 +379,8 @@ fps = 15
 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
 video_writer = cv2.VideoWriter(video_file, fourcc, fps, (100, 100), isColor = False)
 
+print("GPU : ", torch.cuda.is_available())
+
 env_size = 100
 env = np.zeros((env_size, env_size))
 #print(env)
@@ -436,8 +457,7 @@ while total_steps < max_step:
         state = next_state
     
         if done:
-            observed_areas = 100 * (exploration.whole_area - exploration.observable_area) / exploration.whole_area
-            print("Observed Areas : ", observed_areas)
+            wandb.log({"Exploration Boundary " : exploration.final_observation})
             if total_steps % eval_interval == 0:
                 rewards = evaluate()
                 print("Steps: {}  AvgReturn: {}".format(total_steps, rewards))
